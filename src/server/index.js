@@ -7,208 +7,12 @@
  */
 
 const Koa = require('koa');
-const IO = require('koa-socket-2');
-const Redux = require('redux');
 
 import { DBFromEnv } from './db';
-import { CreateGameReducer } from '../core/reducer';
-import { MAKE_MOVE, GAME_EVENT } from '../core/action-types';
-import { createApiServer, isActionFromAuthenticPlayer } from './api';
+import { createApiServer } from './api';
+import { SocketIO } from './transport/socketio';
 
-const PING_TIMEOUT = 20 * 1e3;
-const PING_INTERVAL = 10 * 1e3;
-
-class GameMaster {
-  constructor(game, db, clients) {
-    this.game = game;
-    this.db = db;
-    this.clients = clients;
-  }
-
-  async onUpdate(action, stateID, gameID, playerID) {
-    let state = await this.db.get(gameID);
-
-    if (state === undefined) {
-      return { error: 'game not found' };
-    }
-
-    const reducer = CreateGameReducer({
-      game: this.game,
-      numPlayers: state.ctx.numPlayers,
-    });
-    const store = Redux.createStore(reducer, state);
-
-    const isActionAuthentic = await isActionFromAuthenticPlayer({
-      action,
-      db: this.db,
-      gameID,
-      playerID,
-    });
-    if (!isActionAuthentic) {
-      return { error: 'unauthorized action' };
-    }
-
-    // Check whether the player is allowed to make the move.
-    if (
-      action.type == MAKE_MOVE &&
-      !this.game.flow.canPlayerMakeMove(state.G, state.ctx, playerID)
-    ) {
-      return;
-    }
-
-    // Check whether the player is allowed to call the event.
-    if (
-      action.type == GAME_EVENT &&
-      !this.game.flow.canPlayerCallEvent(state.G, state.ctx, playerID)
-    ) {
-      return;
-    }
-
-    if (state._stateID == stateID) {
-      let log = store.getState().log || [];
-
-      // Update server's version of the store.
-      store.dispatch(action);
-      state = store.getState();
-
-      this.clients.sendAll(playerID => {
-        const filteredState = {
-          ...state,
-          G: this.game.playerView(state.G, state.ctx, playerID),
-          ctx: { ...state.ctx, _random: undefined },
-          log: undefined,
-          deltalog: undefined,
-        };
-
-        return {
-          type: 'update',
-          args: [gameID, filteredState, state.deltalog],
-        };
-      });
-
-      // TODO: We currently attach the log back into the state
-      // object before storing it, but this should probably
-      // sit in a different part of the database eventually.
-      log = [...log, ...state.deltalog];
-      const stateWithLog = { ...state, log };
-
-      await this.db.set(gameID, stateWithLog);
-    }
-
-    return;
-  }
-
-  async onSync(gameID, playerID, numPlayers) {
-    const reducer = CreateGameReducer({ game: this.game, numPlayers });
-    let state = await this.db.get(gameID);
-
-    if (state === undefined) {
-      const store = Redux.createStore(reducer);
-      state = store.getState();
-      await this.db.set(gameID, state);
-    }
-
-    const filteredState = {
-      ...state,
-      G: this.game.playerView(state.G, state.ctx, playerID),
-      ctx: { ...state.ctx, _random: undefined },
-      log: undefined,
-      deltalog: undefined,
-    };
-
-    this.clients.send({
-      playerID,
-      type: 'sync',
-      args: [gameID, filteredState, state.log],
-    });
-
-    return;
-  }
-}
-
-function SocketIOInterface(_clientInfo, _roomInfo) {
-  const clientInfo = _clientInfo || new Map();
-  const roomInfo = _roomInfo || new Map();
-
-  return {
-    init: (app, games) => {
-      const io = new IO({
-        ioOptions: {
-          pingTimeout: PING_TIMEOUT,
-          pingInterval: PING_INTERVAL,
-        },
-      });
-
-      app.context.io = io;
-      io.attach(app);
-
-      for (const game of games) {
-        const nsp = app._io.of(game.name);
-
-        const api = gameID => {
-          const send = ({ type, playerID, args }) => {
-            const clients = roomInfo.get(gameID).values();
-            for (const client of clients) {
-              const info = clientInfo.get(client);
-              if (info.playerID == playerID) {
-                info.socket.emit.apply(null, [type, ...args]);
-              }
-            }
-          };
-
-          const sendAll = arg => {
-            roomInfo.get(gameID).forEach(c => {
-              const playerID = clientInfo.get(c).playerID;
-
-              if (typeof arg === 'function') {
-                const t = arg(playerID);
-                t.playerID = playerID;
-                send(t);
-              } else {
-                send(arg);
-              }
-            });
-          };
-
-          return { send, sendAll };
-        };
-
-        nsp.on('connection', socket => {
-          socket.on('update', async (action, stateID, gameID, playerID) => {
-            const master = new GameMaster(game, app.context.db, api(gameID));
-            await master.onUpdate(action, stateID, gameID, playerID);
-          });
-
-          socket.on('sync', async (gameID, playerID, numPlayers) => {
-            socket.join(gameID);
-
-            let roomClients = roomInfo.get(gameID);
-            if (roomClients === undefined) {
-              roomClients = new Set();
-              roomInfo.set(gameID, roomClients);
-            }
-            roomClients.add(socket.id);
-
-            clientInfo.set(socket.id, { gameID, playerID, socket });
-
-            const master = new GameMaster(game, app.context.db, api(gameID));
-            await master.onSync(gameID, playerID, numPlayers);
-          });
-
-          socket.on('disconnect', () => {
-            if (clientInfo.has(socket.id)) {
-              const { gameID } = clientInfo.get(socket.id);
-              roomInfo.get(gameID).delete(socket.id);
-              clientInfo.delete(socket.id);
-            }
-          });
-        });
-      }
-    },
-  };
-}
-
-export function Server({ games, db, clientInterface, _clientInfo, _roomInfo }) {
+export function Server({ games, db, transport, _clientInfo, _roomInfo }) {
   const app = new Koa();
 
   if (db === undefined) {
@@ -216,10 +20,10 @@ export function Server({ games, db, clientInterface, _clientInfo, _roomInfo }) {
   }
   app.context.db = db;
 
-  if (clientInterface === undefined) {
-    clientInterface = SocketIOInterface(_clientInfo, _roomInfo);
+  if (transport === undefined) {
+    transport = SocketIO(_clientInfo, _roomInfo);
   }
-  clientInterface.init(app, games);
+  transport.init(app, games);
 
   const api = createApiServer({ db, games });
 
