@@ -139,7 +139,7 @@ function SocketInterface(_clientInfo, _roomInfo) {
       app.context.io = io;
       io.attach(app);
 
-      for (const game in games) {
+      for (const game of games) {
         const nsp = app._io.of(game.name);
 
         const obj = {
@@ -155,17 +155,25 @@ function SocketInterface(_clientInfo, _roomInfo) {
             for (const client of clients) {
               const info = clientInfo.get(client);
               if (info.playerID == playerID) {
-                io.to(info.socket.id).emit.apply(null, ['update', ...args]);
+                info.socket.emit.apply(null, ['update', ...args]);
+              } else {
+                info.socket
+                  .to(info.socket.id)
+                  .emit.apply(null, ['update', ...args]);
               }
             }
           },
 
           sendSync: (gameID, playerID, args) => {
-            const clients = roomInfo.get(gameID).values();
-            for (const client of clients) {
+            const clients = roomInfo.get(gameID);
+            for (const client of clients.values()) {
               const info = clientInfo.get(client);
               if (info.playerID == playerID) {
-                io.to(info.socket.id).emit.apply(null, ['sync', ...args]);
+                info.socket.emit.apply(null, ['update', ...args]);
+              } else {
+                info.socket
+                  .to(info.socket.id)
+                  .emit.apply(null, ['update', ...args]);
               }
             }
           },
@@ -175,7 +183,7 @@ function SocketInterface(_clientInfo, _roomInfo) {
 
         nsp.on('connection', socket => {
           socket.on('update', async (action, stateID, gameID, playerID) => {
-            await master.onUpdate(socket, action, stateID, gameID, playerID);
+            await master.onUpdate(action, stateID, gameID, playerID);
           });
 
           socket.on('sync', async (gameID, playerID, numPlayers) => {
@@ -189,8 +197,7 @@ function SocketInterface(_clientInfo, _roomInfo) {
             roomClients.add(socket.id);
 
             clientInfo.set(socket.id, { gameID, playerID, socket });
-
-            await master.onSync(socket, gameID, playerID, numPlayers);
+            await master.onSync(gameID, playerID, numPlayers);
           });
 
           socket.on('disconnect', () => {
@@ -215,7 +222,7 @@ export function Server({ games, db, clientInterface, _clientInfo, _roomInfo }) {
   app.context.db = db;
 
   if (clientInterface === undefined) {
-    clientInterface = SocketInterface(app, _clientInfo, _roomInfo);
+    clientInterface = SocketInterface(_clientInfo, _roomInfo);
   }
   clientInterface.init(app, games);
 

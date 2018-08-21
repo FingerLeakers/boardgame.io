@@ -97,19 +97,23 @@ test('connect / disconnect', async () => {
   io.socket.id = '1';
   await io.socket.receive('sync', 'gameID', '1', 2);
 
-  expect(toObj(_clientInfo)).toEqual({
-    '0': { gameID: 'gameID', playerID: '0' },
-    '1': { gameID: 'gameID', playerID: '1' },
+  expect(toObj(_clientInfo)['0']).toMatchObject({
+    gameID: 'gameID',
+    playerID: '0',
   });
-  expect(toObj(_roomInfo.get('gameID'))).toEqual({ '0': '0', '1': '1' });
+  expect(toObj(_clientInfo)['1']).toMatchObject({
+    gameID: 'gameID',
+    playerID: '1',
+  });
 
   // 0 disconnects.
 
   io.socket.id = '0';
   await io.socket.receive('disconnect');
 
-  expect(toObj(_clientInfo)).toEqual({
-    '1': { gameID: 'gameID', playerID: '1' },
+  expect(toObj(_clientInfo)['1']).toMatchObject({
+    gameID: 'gameID',
+    playerID: '1',
   });
   expect(toObj(_roomInfo.get('gameID'))).toEqual({ '1': '1' });
 
