@@ -71,8 +71,7 @@ class GameMaster {
       store.dispatch(action);
       state = store.getState();
 
-      // Get clients connected to this current game.
-      for (const playerID of this.clients.getClients(gameID)) {
+      this.clients.sendAll(playerID => {
         const filteredState = {
           ...state,
           G: this.game.playerView(state.G, state.ctx, playerID),
@@ -81,12 +80,11 @@ class GameMaster {
           deltalog: undefined,
         };
 
-        this.clients.sendUpdate(gameID, playerID, [
-          gameID,
-          filteredState,
-          state.deltalog,
-        ]);
-      }
+        return {
+          type: 'update',
+          args: [gameID, filteredState, state.deltalog],
+        };
+      });
 
       // TODO: We currently attach the log back into the state
       // object before storing it, but this should probably
@@ -118,13 +116,17 @@ class GameMaster {
       deltalog: undefined,
     };
 
-    this.clients.sendSync(gameID, playerID, [gameID, filteredState, state.log]);
+    this.clients.send({
+      playerID,
+      type: 'sync',
+      args: [gameID, filteredState, state.log],
+    });
 
     return;
   }
 }
 
-function SocketInterface(_clientInfo, _roomInfo) {
+function SocketIOInterface(_clientInfo, _roomInfo) {
   const clientInfo = _clientInfo || new Map();
   const roomInfo = _roomInfo || new Map();
 
@@ -143,40 +145,37 @@ function SocketInterface(_clientInfo, _roomInfo) {
       for (const game of games) {
         const nsp = app._io.of(game.name);
 
-        const obj = {
-          getClients: gameID => {
-            let playerIDs = [];
-            roomInfo
-              .get(gameID)
-              .forEach(c => playerIDs.push(clientInfo.get(c).playerID));
-            return playerIDs;
-          },
-
-          sendUpdate: (gameID, playerID, args) => {
+        const api = gameID => {
+          const send = ({ type, playerID, args }) => {
             const clients = roomInfo.get(gameID).values();
             for (const client of clients) {
               const info = clientInfo.get(client);
               if (info.playerID == playerID) {
-                info.socket.emit.apply(null, ['update', ...args]);
+                info.socket.emit.apply(null, [type, ...args]);
               }
             }
-          },
+          };
 
-          sendSync: (gameID, playerID, args) => {
-            const clients = roomInfo.get(gameID);
-            for (const client of clients.values()) {
-              const info = clientInfo.get(client);
-              if (info.playerID == playerID) {
-                info.socket.emit.apply(null, ['update', ...args]);
+          const sendAll = arg => {
+            roomInfo.get(gameID).forEach(c => {
+              const playerID = clientInfo.get(c).playerID;
+
+              if (typeof arg === 'function') {
+                const t = arg(playerID);
+                t.playerID = playerID;
+                send(t);
+              } else {
+                send(arg);
               }
-            }
-          },
+            });
+          };
+
+          return { send, sendAll };
         };
-
-        const master = new GameMaster(game, app.context.db, obj);
 
         nsp.on('connection', socket => {
           socket.on('update', async (action, stateID, gameID, playerID) => {
+            const master = new GameMaster(game, app.context.db, api(gameID));
             await master.onUpdate(action, stateID, gameID, playerID);
           });
 
@@ -191,6 +190,8 @@ function SocketInterface(_clientInfo, _roomInfo) {
             roomClients.add(socket.id);
 
             clientInfo.set(socket.id, { gameID, playerID, socket });
+
+            const master = new GameMaster(game, app.context.db, api(gameID));
             await master.onSync(gameID, playerID, numPlayers);
           });
 
@@ -216,7 +217,7 @@ export function Server({ games, db, clientInterface, _clientInfo, _roomInfo }) {
   app.context.db = db;
 
   if (clientInterface === undefined) {
-    clientInterface = SocketInterface(_clientInfo, _roomInfo);
+    clientInterface = SocketIOInterface(_clientInfo, _roomInfo);
   }
   clientInterface.init(app, games);
 
