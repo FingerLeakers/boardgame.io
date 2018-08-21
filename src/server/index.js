@@ -18,7 +18,7 @@ import { createApiServer, isActionFromAuthenticPlayer } from './api';
 const PING_TIMEOUT = 20 * 1e3;
 const PING_INTERVAL = 10 * 1e3;
 
-function GameMaster(game, db) {
+function GameMaster(game, db, clients) {
   const onUpdate = async (action, stateID, gameID, playerID) => {
     let state = await db.get(gameID);
 
@@ -66,9 +66,7 @@ function GameMaster(game, db) {
       state = store.getState();
 
       // Get clients connected to this current game.
-      const roomClients = roomInfo.get(gameID);
-      for (const client of roomClients.values()) {
-        const { playerID } = clientInfo.get(client);
+      for (const playerID of clients.getClients()) {
         const filteredState = {
           ...state,
           G: game.playerView(state.G, state.ctx, playerID),
@@ -77,13 +75,11 @@ function GameMaster(game, db) {
           deltalog: undefined,
         };
 
-        if (client === socket.id) {
-          socket.emit('update', gameID, filteredState, state.deltalog);
-        } else {
-          socket
-            .to(client)
-            .emit('update', gameID, filteredState, state.deltalog);
-        }
+        clients.sendUpdate(gameID, playerID, [
+          gameID,
+          filteredState,
+          state.deltalog,
+        ]);
       }
 
       // TODO: We currently attach the log back into the state
@@ -116,7 +112,7 @@ function GameMaster(game, db) {
       deltalog: undefined,
     };
 
-    socket.emit('sync', gameID, filteredState, state.log);
+    clients.sendSync(gameID, playerID, [gameID, filteredState, state.log]);
 
     return;
   };
@@ -146,7 +142,36 @@ function SocketInterface(_clientInfo, _roomInfo) {
       for (const game in games) {
         const nsp = app._io.of(game.name);
 
-        const master = new GameMaster(game, app.context.db);
+        const obj = {
+          getClients: gameID => {
+            return roomInfo
+              .get(gameID)
+              .values()
+              .map(c => clientInfo.get(c).playerID);
+          },
+
+          sendUpdate: (gameID, playerID, args) => {
+            const clients = roomInfo.get(gameID).values();
+            for (const client of clients) {
+              const info = clientInfo.get(client);
+              if (info.playerID == playerID) {
+                io.to(info.socket.id).emit.apply(null, ['update', ...args]);
+              }
+            }
+          },
+
+          sendSync: (gameID, playerID, args) => {
+            const clients = roomInfo.get(gameID).values();
+            for (const client of clients) {
+              const info = clientInfo.get(client);
+              if (info.playerID == playerID) {
+                io.to(info.socket.id).emit.apply(null, ['sync', ...args]);
+              }
+            }
+          },
+        };
+
+        const master = new GameMaster(game, app.context.db, obj);
 
         nsp.on('connection', socket => {
           socket.on('update', async (action, stateID, gameID, playerID) => {
@@ -163,7 +188,7 @@ function SocketInterface(_clientInfo, _roomInfo) {
             }
             roomClients.add(socket.id);
 
-            clientInfo.set(socket.id, { gameID, playerID });
+            clientInfo.set(socket.id, { gameID, playerID, socket });
 
             await master.onSync(socket, gameID, playerID, numPlayers);
           });
@@ -177,7 +202,7 @@ function SocketInterface(_clientInfo, _roomInfo) {
           });
         });
       }
-    }
+    },
   };
 }
 
