@@ -18,23 +18,29 @@ import { createApiServer, isActionFromAuthenticPlayer } from './api';
 const PING_TIMEOUT = 20 * 1e3;
 const PING_INTERVAL = 10 * 1e3;
 
-function GameMaster(game, db, clients) {
-  const onUpdate = async (action, stateID, gameID, playerID) => {
-    let state = await db.get(gameID);
+class GameMaster {
+  constructor(game, db, clients) {
+    this.game = game;
+    this.db = db;
+    this.clients = clients;
+  }
+
+  async onUpdate(action, stateID, gameID, playerID) {
+    let state = await this.db.get(gameID);
 
     if (state === undefined) {
       return { error: 'game not found' };
     }
 
     const reducer = CreateGameReducer({
-      game,
+      game: this.game,
       numPlayers: state.ctx.numPlayers,
     });
     const store = Redux.createStore(reducer, state);
 
     const isActionAuthentic = await isActionFromAuthenticPlayer({
       action,
-      db,
+      db: this.db,
       gameID,
       playerID,
     });
@@ -45,7 +51,7 @@ function GameMaster(game, db, clients) {
     // Check whether the player is allowed to make the move.
     if (
       action.type == MAKE_MOVE &&
-      !game.flow.canPlayerMakeMove(state.G, state.ctx, playerID)
+      !this.game.flow.canPlayerMakeMove(state.G, state.ctx, playerID)
     ) {
       return;
     }
@@ -53,7 +59,7 @@ function GameMaster(game, db, clients) {
     // Check whether the player is allowed to call the event.
     if (
       action.type == GAME_EVENT &&
-      !game.flow.canPlayerCallEvent(state.G, state.ctx, playerID)
+      !this.game.flow.canPlayerCallEvent(state.G, state.ctx, playerID)
     ) {
       return;
     }
@@ -66,16 +72,16 @@ function GameMaster(game, db, clients) {
       state = store.getState();
 
       // Get clients connected to this current game.
-      for (const playerID of clients.getClients()) {
+      for (const playerID of this.clients.getClients(gameID)) {
         const filteredState = {
           ...state,
-          G: game.playerView(state.G, state.ctx, playerID),
+          G: this.game.playerView(state.G, state.ctx, playerID),
           ctx: { ...state.ctx, _random: undefined },
           log: undefined,
           deltalog: undefined,
         };
 
-        clients.sendUpdate(gameID, playerID, [
+        this.clients.sendUpdate(gameID, playerID, [
           gameID,
           filteredState,
           state.deltalog,
@@ -88,39 +94,34 @@ function GameMaster(game, db, clients) {
       log = [...log, ...state.deltalog];
       const stateWithLog = { ...state, log };
 
-      await db.set(gameID, stateWithLog);
+      await this.db.set(gameID, stateWithLog);
     }
 
     return;
-  };
+  }
 
-  const onSync = async (gameID, playerID, numPlayers) => {
-    const reducer = CreateGameReducer({ game, numPlayers });
-    let state = await db.get(gameID);
+  async onSync(gameID, playerID, numPlayers) {
+    const reducer = CreateGameReducer({ game: this.game, numPlayers });
+    let state = await this.db.get(gameID);
 
     if (state === undefined) {
       const store = Redux.createStore(reducer);
       state = store.getState();
-      await db.set(gameID, state);
+      await this.db.set(gameID, state);
     }
 
     const filteredState = {
       ...state,
-      G: game.playerView(state.G, state.ctx, playerID),
+      G: this.game.playerView(state.G, state.ctx, playerID),
       ctx: { ...state.ctx, _random: undefined },
       log: undefined,
       deltalog: undefined,
     };
 
-    clients.sendSync(gameID, playerID, [gameID, filteredState, state.log]);
+    this.clients.sendSync(gameID, playerID, [gameID, filteredState, state.log]);
 
     return;
-  };
-
-  return {
-    onUpdate,
-    onSync,
-  };
+  }
 }
 
 function SocketInterface(_clientInfo, _roomInfo) {
@@ -144,10 +145,11 @@ function SocketInterface(_clientInfo, _roomInfo) {
 
         const obj = {
           getClients: gameID => {
-            return roomInfo
+            let playerIDs = [];
+            roomInfo
               .get(gameID)
-              .values()
-              .map(c => clientInfo.get(c).playerID);
+              .forEach(c => playerIDs.push(clientInfo.get(c).playerID));
+            return playerIDs;
           },
 
           sendUpdate: (gameID, playerID, args) => {
@@ -156,10 +158,6 @@ function SocketInterface(_clientInfo, _roomInfo) {
               const info = clientInfo.get(client);
               if (info.playerID == playerID) {
                 info.socket.emit.apply(null, ['update', ...args]);
-              } else {
-                info.socket
-                  .to(info.socket.id)
-                  .emit.apply(null, ['update', ...args]);
               }
             }
           },
@@ -170,10 +168,6 @@ function SocketInterface(_clientInfo, _roomInfo) {
               const info = clientInfo.get(client);
               if (info.playerID == playerID) {
                 info.socket.emit.apply(null, ['update', ...args]);
-              } else {
-                info.socket
-                  .to(info.socket.id)
-                  .emit.apply(null, ['update', ...args]);
               }
             }
           },

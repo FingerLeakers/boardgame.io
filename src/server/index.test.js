@@ -172,9 +172,9 @@ describe('update', async () => {
 
   describe('with clients connected', () => {
     beforeAll(async () => {
-      await io.socket.receive('sync', 'gameID');
+      await io.socket.receive('sync', 'gameID', '0');
       io.socket.id = 'second';
-      await io.socket.receive('sync', 'gameID');
+      await io.socket.receive('sync', 'gameID', '1');
       io.socket.emit.mockReset();
     });
 
